@@ -1,0 +1,16 @@
+from flask import Flask
+from flask_socketio import SocketIO
+
+app = Flask(__name__)
+socketio = SocketIO(app)
+
+@app.route('/')
+def home():
+    return "WebSocket server for clipboard sync is running!"
+
+@socketio.on('clipboard_update')
+def handle_clipboard_update(data):
+    socketio.emit('clipboard_update', data, broadcast=True)
+
+if __name__ == '__main__':
+    socketio.run(app, host='0.0.0.0', port=5001)
