@@ -1,19 +1,133 @@
-import uvicorn
+#!/usr/bin/env python3
+"""
+SIC
+Main entry point for starting the Linux-Android integration system.
+"""
+
 import os
 import sys
+import argparse
+import subprocess
+import signal
+import time
 from pathlib import Path
 
-# Add the project root to Python path
-project_root = Path(__file__).parent
-sys.path.insert(0, str(project_root))
+# Set up base paths
+PROJECT_ROOT = Path(__file__).parent.resolve()
+LINUX_SERVER_PATH = PROJECT_ROOT / "linux-server"
+
+def start_server(args):
+    """Start the Linux server with the specified arguments"""
+    cmd = [sys.executable, str(LINUX_SERVER_PATH / "serve.py")]
+    
+    # Add arguments
+    if args.host:
+        cmd.extend(["--host", args.host])
+    
+    if args.port:
+        cmd.extend(["--port", str(args.port)])
+    
+    if args.debug:
+        cmd.append("--debug")
+    
+    if args.reload:
+        cmd.append("--reload")
+    
+    if args.no_clipboard:
+        cmd.append("--no-clipboard")
+    
+    if args.no_notifications:
+        cmd.append("--no-notifications")
+    
+    if args.generate_qr:
+        cmd.append("--generate-qr")
+    
+    # Start server
+    print(f"Starting SIC server: {' '.join(cmd)}")
+    return subprocess.Popen(cmd)
+
+def check_dependencies():
+    """Check if all dependencies are installed"""
+    try:
+        # Try to import required packages
+        import fastapi
+        import uvicorn
+        import websockets
+        import cryptography
+        import pyperclip
+        import zeroconf
+        
+        print("✅ All basic dependencies are installed.")
+        return True
+    except ImportError as e:
+        print(f"❌ Missing dependency: {e}")
+        print("Please run: pip install -r requirements.txt")
+        return False
+
+def install_systemd_service():
+    """Install a systemd user service for auto-start on login"""
+    service_path = Path.home() / ".config" / "systemd" / "user"
+    service_path.mkdir(parents=True, exist_ok=True)
+    
+    service_file = service_path / "sic.service"
+    
+    service_content = f"""[Unit]
+Description=SIC
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={sys.executable} {PROJECT_ROOT / "run.py"}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+"""
+    
+    with open(service_file, "w") as f:
+        f.write(service_content)
+    
+    print(f"Created systemd service file at: {service_file}")
+    print("To enable auto-start on login, run:")
+    print("  systemctl --user enable sic.service")
+    print("To start the service now, run:")
+    print("  systemctl --user start sic.service")
+
+def main():
+    """Main entry point"""
+    parser = argparse.ArgumentParser(description="SIC")
+    parser.add_argument("--host", type=str, help="Host to bind the server to")
+    parser.add_argument("--port", type=int, help="Port to bind the server to")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--reload", action="store_true", help="Enable auto-reload for development")
+    parser.add_argument("--no-clipboard", action="store_true", help="Disable clipboard synchronization")
+    parser.add_argument("--no-notifications", action="store_true", help="Disable notification mirroring")
+    parser.add_argument("--generate-qr", action="store_true", help="Generate QR code for pairing")
+    parser.add_argument("--install-service", action="store_true", help="Install systemd user service")
+    
+    args = parser.parse_args()
+    
+    if args.install_service:
+        install_systemd_service()
+        return
+    
+    if not check_dependencies():
+        return
+    
+    print("Starting SIC")
+    print("Press Ctrl+C to exit")
+    
+    server_process = start_server(args)
+    
+    try:
+        # Keep the main process running
+        while server_process.poll() is None:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Shutting down...")
+        server_process.send_signal(signal.SIGINT)
+        server_process.wait()
 
 if __name__ == "__main__":
-    # Start the server
-    uvicorn.run(
-        "linux-server.backend.main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True
-    )
-    
-    print("Server running at http://localhost:8000")
+    main()

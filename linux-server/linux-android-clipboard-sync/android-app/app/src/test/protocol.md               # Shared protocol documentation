@@ -1,7 +1,0 @@
-{
-    "action": "update",
-    "data": {
-        "clipboard_content": "string",
-        "timestamp": "ISO 8601 timestamp"
-    }
-}

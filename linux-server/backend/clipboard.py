@@ -1,105 +1,152 @@
+"""
+Clipboard monitoring and synchronization module for the Linux server.
+Uses pyperclip for clipboard operations and provides mechanisms to prevent infinite sync loops.
+"""
+
 import pyperclip
-import time
 import threading
+import time
 import logging
-import json
-from datetime import datetime
+import asyncio
+from typing import Callable, Optional, Any, Awaitable, Union
 
 logger = logging.getLogger(__name__)
 
-class ClipboardMonitor:
-    def __init__(self, broadcast_callback, poll_interval=0.5):
-        """
-        Initialize clipboard monitor
+# Global flag to prevent clipboard sync loops
+_clipboard_last_sync = None
+_clipboard_lock = threading.Lock()
+_clipboard_callback = None
+_monitoring_thread = None
+_should_monitor = False
+_main_event_loop = None
+
+def set_clipboard_text(text: str) -> bool:
+    """
+    Set the clipboard text and mark it as the last sync value to prevent loops.
+    
+    Args:
+        text: Text to set in clipboard
         
-        Args:
-            broadcast_callback: Async function that sends clipboard data to clients
-            poll_interval: How often to check clipboard (seconds)
-        """
-        self.broadcast_callback = broadcast_callback
-        self.poll_interval = poll_interval
-        self.last_content = ""
-        self.running = False
-        self.monitor_thread = None
-        
-    def start(self):
-        """Start the clipboard monitoring thread"""
-        if self.running:
-            return
-            
-        self.running = True
-        self.monitor_thread = threading.Thread(target=self._monitor_clipboard)
-        self.monitor_thread.daemon = True
-        self.monitor_thread.start()
-        logger.info("Clipboard monitoring started")
-        
-    def stop(self):
-        """Stop the clipboard monitoring thread"""
-        self.running = False
-        if self.monitor_thread:
-            self.monitor_thread.join(timeout=2.0)
-        logger.info("Clipboard monitoring stopped")
-        
-    def _monitor_clipboard(self):
-        """Monitor clipboard for changes"""
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    global _clipboard_last_sync
+    
+    try:
+        with _clipboard_lock:
+            _clipboard_last_sync = text  # Mark this as coming from sync
+            pyperclip.copy(text)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to set clipboard: {e}")
+        return False
+
+def get_clipboard_text() -> str:
+    """
+    Get current clipboard text.
+    
+    Returns:
+        str: Current clipboard content
+    """
+    try:
+        return pyperclip.paste()
+    except Exception as e:
+        logger.error(f"Failed to get clipboard: {e}")
+        return ""
+
+def register_clipboard_change_callback(callback: Callable[[str], Any], loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
+    """
+    Register a callback to be called when clipboard content changes locally.
+    
+    Args:
+        callback: Function that takes clipboard text and does something with it
+        loop: Event loop to use for async callbacks
+    """
+    global _clipboard_callback, _main_event_loop
+    _clipboard_callback = callback
+    _main_event_loop = loop or asyncio.get_event_loop()
+
+def _monitor_clipboard() -> None:
+    """
+    Monitor clipboard for changes in a separate thread.
+    When changes occur and they don't match the last sync value,
+    the registered callback is called.
+    """
+    global _clipboard_last_sync, _should_monitor, _main_event_loop
+    
+    last_content = get_clipboard_text()
+    logger.info("Clipboard monitoring started")
+    
+    while _should_monitor:
         try:
-            # Get initial clipboard content
-            try:
-                self.last_content = pyperclip.paste()
-            except:
-                self.last_content = ""
-                logger.warning("Could not access clipboard initially")
+            current_content = get_clipboard_text()
             
-            while self.running:
-                try:
-                    # Get current clipboard content
-                    current_content = pyperclip.paste()
+            # Only notify if content changed and it's not from a sync operation
+            with _clipboard_lock:
+                if (current_content != last_content and 
+                    current_content != _clipboard_last_sync and
+                    current_content.strip()):
                     
-                    # Check if content changed
-                    if current_content != self.last_content:
-                        self.last_content = current_content
-                        
-                        # Create message payload
-                        message = {
-                            "type": "clipboard",
-                            "content": current_content,
-                            "timestamp": datetime.now().isoformat()
-                        }
-                        
-                        # Use threading to call the async broadcast function
-                        threading.Thread(
-                            target=self._async_broadcast, 
-                            args=(json.dumps(message),)
-                        ).start()
-                        
-                        logger.info(f"Clipboard changed: {current_content[:50]}...")
-                except Exception as e:
-                    logger.error(f"Error monitoring clipboard: {e}")
+                    logger.debug(f"Clipboard changed locally: {current_content[:50]}...")
+                    
+                    if _clipboard_callback:
+                        # Call the callback function safely
+                        try:
+                            _clipboard_callback(current_content)
+                        except RuntimeError as e:
+                            if "no current event loop" in str(e).lower():
+                                logger.debug("No event loop in thread, using stored main loop")
+                                if _main_event_loop:
+                                    try:
+                                        # If we have the main event loop, use it
+                                        if asyncio.iscoroutine(_clipboard_callback(current_content)):
+                                            asyncio.run_coroutine_threadsafe(
+                                                _clipboard_callback(current_content), 
+                                                _main_event_loop
+                                            )
+                                    except Exception as inner_e:
+                                        logger.error(f"Error dispatching to main event loop: {inner_e}")
+                            else:
+                                logger.error(f"Runtime error in callback: {e}")
+                        except Exception as e:
+                            logger.error(f"Error in clipboard callback: {e}")
+                    
+                # Reset the last sync indicator after we've checked it    
+                if _clipboard_last_sync == current_content:
+                    _clipboard_last_sync = None
                 
-                # Wait before next check
-                time.sleep(self.poll_interval)
-        except Exception as e:
-            logger.error(f"Clipboard monitor thread error: {e}")
+            last_content = current_content
             
-    def _async_broadcast(self, message):
-        """Helper to call async broadcast function from thread"""
-        import asyncio
-        
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        try:
-            loop.run_until_complete(self.broadcast_callback(message))
-        finally:
-            loop.close()
-            
-    def set_clipboard(self, content):
-        """Set clipboard content"""
-        try:
-            pyperclip.copy(content)
-            self.last_content = content
-            logger.info(f"Clipboard set: {content[:50]}...")
-            return True
         except Exception as e:
-            logger.error(f"Error setting clipboard: {e}")
-            return False
+            logger.error(f"Error in clipboard monitoring: {e}")
+            
+        # Polling interval
+        time.sleep(0.5)
+    
+    logger.info("Clipboard monitoring stopped")
+
+def start_monitoring() -> bool:
+    """
+    Start the clipboard monitoring thread.
+    
+    Returns:
+        bool: True if started, False otherwise
+    """
+    global _monitoring_thread, _should_monitor
+    
+    if _monitoring_thread and _monitoring_thread.is_alive():
+        logger.warning("Clipboard monitoring already running")
+        return False
+    
+    _should_monitor = True
+    _monitoring_thread = threading.Thread(target=_monitor_clipboard, daemon=True)
+    _monitoring_thread.start()
+    return True
+
+def stop_monitoring() -> None:
+    """Stop the clipboard monitoring thread."""
+    global _should_monitor
+    _should_monitor = False
+    
+    if _monitoring_thread:
+        _monitoring_thread.join(timeout=1.0)
