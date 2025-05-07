@@ -13,6 +13,7 @@ from zeroconf import ServiceInfo, Zeroconf
 import time
 import random
 import string
+import psutil  # Add this import to check for port usage
 
 # Set up logging
 logging.basicConfig(
@@ -37,21 +38,48 @@ os.makedirs(BASE_DIR / "static", exist_ok=True)
 # Mount static files directory
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
-# Generate a unique device ID if not already saved
+# Generate or load a unique device ID
 DEVICE_ID_FILE = BASE_DIR / ".device_id"
-if DEVICE_ID_FILE.exists():
-    with open(DEVICE_ID_FILE, "r") as f:
-        DEVICE_ID = f.read().strip()
-else:
-    DEVICE_ID = str(uuid.uuid4())
+def load_device_id():
+    if DEVICE_ID_FILE.exists():
+        try:
+            with open(DEVICE_ID_FILE, "r") as f:
+                device_id = f.read().strip()
+                if device_id:
+                    logger.info(f"Loaded device ID from file: {device_id}")
+                    return device_id
+        except Exception as e:
+            logger.error(f"Error reading device ID file: {e}")
+    # Generate new if not found or invalid
+    device_id = str(uuid.uuid4())
     with open(DEVICE_ID_FILE, "w") as f:
-        f.write(DEVICE_ID)
+        f.write(device_id)
+    logger.info(f"Generated new device ID: {device_id}")
+    return device_id
 
-# Generate a random pairing code for initial device pairing
-def generate_pairing_code(length=6):
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
+DEVICE_ID = load_device_id()
 
-PAIRING_CODE = generate_pairing_code()
+# Store pairing code persistently
+PAIRING_CODE_FILE = BASE_DIR / ".pairing_code"
+def load_pairing_code(length=6):
+    if PAIRING_CODE_FILE.exists():
+        try:
+            with open(PAIRING_CODE_FILE, "r") as f:
+                code = f.read().strip()
+                if code and len(code) == length:
+                    logger.info(f"Loaded pairing code from file: {code}")
+                    return code
+        except Exception as e:
+            logger.error(f"Error reading pairing code file: {e}")
+    # Generate new if not found or invalid
+    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
+    with open(PAIRING_CODE_FILE, "w") as f:
+        f.write(code)
+    logger.info(f"Generated new pairing code: {code}")
+    return code
+
+PAIRING_CODE = load_pairing_code()
+
 PAIRED_DEVICES = {}  # Store MAC address / device ID of paired devices
 PAIRING_FILE = BASE_DIR / ".paired_devices"
 
@@ -59,25 +87,27 @@ PAIRING_FILE = BASE_DIR / ".paired_devices"
 if PAIRING_FILE.exists():
     try:
         with open(PAIRING_FILE, "r") as f:
-            PAIRED_DEVICES = json.load(f)
-    except:
-        logger.warning("Failed to load paired devices file")
+            PAIRED_DEVICES.update(json.load(f))
+            logger.info(f"Loaded paired devices from file: {PAIRED_DEVICES}")
+    except Exception as e:
+        logger.error(f"Error reading paired devices file: {e}")
 
-# Save paired devices
 def save_paired_devices():
-    with open(PAIRING_FILE, "w") as f:
-        json.dump(PAIRED_DEVICES, f)
+    try:
+        with open(PAIRING_FILE, "w") as f:
+            json.dump(PAIRED_DEVICES, f)
+        logger.info("Paired devices saved successfully.")
+    except Exception as e:
+        logger.error(f"Error saving paired devices: {e}")
 
-# Connection manager for WebSockets
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: dict[str, WebSocket] = {}  # Map device ID to connection
-        self.clipboard_last_sync = None  # Track last clipboard sync to prevent loops
-        self.pending_pairings = {}  # Temporary store for devices in pairing process
-    
-    async def connect(self, websocket: WebSocket, device_id: str = None):
+        self.active_connections = {}
+
+    async def connect(self, websocket: WebSocket, device_id: str | None = None):
         await websocket.accept()
-        # If the device ID is provided and recognized/paired, store the connection
+        # Fixing the indentation error in the main.py file
+        # Correcting the indentation of the block that checks if the device ID is paired
         if device_id and device_id in PAIRED_DEVICES:
             self.active_connections[device_id] = websocket
             logger.info(f"Paired device {device_id} connected. Total connections: {len(self.active_connections)}")
@@ -120,9 +150,15 @@ def setup_mdns():
     hostname = socket.gethostname()
     local_ip = socket.gethostbyname(hostname)
     port = 8000  # Our FastAPI server port
-    
+
+    # Check if the port is already in use
+    for conn in psutil.net_connections(kind='inet'):
+        if conn.laddr and hasattr(conn.laddr, 'port') and conn.laddr.port == port:
+            logger.error(f"Port {port} is already in use. mDNS setup aborted.")
+            return None, None
+
     logger.info(f"Setting up mDNS with IP: {local_ip}")
-    
+
     # Create ServiceInfo object
     service_info = ServiceInfo(
         "_sic-sync._tcp.local.",  # Service type
@@ -137,11 +173,11 @@ def setup_mdns():
             b'hostname': hostname.encode('utf-8'),
         }
     )
-    
+
     zeroconf = Zeroconf()
     zeroconf.register_service(service_info)
     logger.info(f"mDNS service registered: {service_info.name}")
-    
+
     # Return zeroconf and service_info for later unregistration
     return zeroconf, service_info
 
@@ -186,6 +222,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 await handle_file_transfer_init(websocket, connection_id, data)
             elif data.get("type") == "file_transfer_chunk":
                 await handle_file_transfer_chunk(connection_id, data)
+            elif data.get("type") == "ping":
+                # Handle heartbeat ping
+                await websocket.send_text(json.dumps({"type": "pong"}))
             else:
                 logger.warning(f"Unknown message type: {data.get('type')}")
                 
@@ -212,58 +251,55 @@ async def handle_pairing(websocket, connection_id, data):
         }
         save_paired_devices()
         
-        # Send confirmation and rotate pairing code
+        # Send pairing confirmation
         await websocket.send_text(json.dumps({
             "type": "pairing_response",
-            "success": True,
-            "message": "Pairing successful",
-            "server_id": DEVICE_ID,
-            "server_name": socket.gethostname()
+            "status": "success",
+            "device_id": device_id,
+            "device_name": device_name,
+            "device_type": device_type
         }))
         
-        # Generate a new code for security
-        PAIRING_CODE = generate_pairing_code()
-        logger.info(f"Device {device_name} ({device_id}) paired successfully. New pairing code: {PAIRING_CODE}")
+        # Update connection manager
+        manager.disconnect(connection_id)
+        await manager.connect(websocket, device_id)
     else:
         await websocket.send_text(json.dumps({
             "type": "pairing_response",
-            "success": False,
-            "message": "Invalid pairing code"
+            "status": "failed",
+            "reason": "Invalid pairing code"
         }))
-        logger.warning(f"Failed pairing attempt from {connection_id}")
 
 async def handle_clipboard(websocket, connection_id, data):
-    """Handle clipboard sync messages"""
-    # Check if this is from a paired device
-    device_id = data.get("device_id")
-    if device_id not in PAIRED_DEVICES:
-        logger.warning(f"Clipboard sync from unpaired device: {device_id}")
-        return
-    
-    # Set clipboard data locally - will be implemented in clipboard.py
-    from .clipboard import set_clipboard_text, get_clipboard_text
-    
-    text = data.get("text", "")
-    if text:
-        # Store that we received this text to avoid loop
-        manager.clipboard_last_sync = text
-        set_clipboard_text(text)
-        logger.info(f"Clipboard updated from device {device_id}")
-
-async def handle_notification(connection_id, data):
-    """Handle notification messages"""
-    # Process notification - will be implemented in notifier.py
-    pass
+    """Stub for clipboard synchronization handling"""
+    logger.info("Clipboard sync request received but not implemented.")
 
 async def handle_file_transfer_init(websocket, connection_id, data):
-    """Handle file transfer initialization"""
-    # File transfer handling - will be implemented in filetransfer.py
-    pass
+    """Stub for file transfer initialization"""
+    logger.info("File transfer init request received but not implemented.")
 
 async def handle_file_transfer_chunk(connection_id, data):
-    """Handle file transfer data chunks"""
-    # File chunk handling - will be implemented in filetransfer.py
-    pass
+    """Stub for file transfer chunk handling"""
+    logger.info("File transfer chunk received but not implemented.")
 
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+async def handle_notification(connection_id, data):
+    """Handle incoming notifications"""
+    try:
+        notification_type = data.get("notification_type")
+        message = data.get("message")
+
+        if not notification_type or not message:
+            logger.warning("Invalid notification data received.")
+            return
+
+        logger.info(f"Notification received: {notification_type} - {message}")
+
+        # Example: Broadcast the notification to all connected clients
+        await manager.broadcast({
+            "type": "notification",
+            "notification_type": notification_type,
+            "message": message
+        }, exclude=connection_id)
+
+    except Exception as e:
+        logger.error(f"Error processing notification: {e}")

@@ -11,6 +11,7 @@ import uvicorn
 import asyncio
 from pathlib import Path
 import argparse
+import psutil
 
 # Setup logging
 logging.basicConfig(
@@ -25,6 +26,13 @@ logger = logging.getLogger("sic-server")
 # Make backend module available for import
 SERVER_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SERVER_DIR))
+
+def is_port_in_use(port):
+    """Check if a port is already in use."""
+    for conn in psutil.net_connections(kind='inet'):
+        if conn.laddr and conn.laddr.port == port:
+            return True
+    return False
 
 # Run server
 if __name__ == "__main__":
@@ -42,6 +50,11 @@ if __name__ == "__main__":
     # Set logging level
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
+    
+    # Check if the port is available
+    if is_port_in_use(args.port):
+        logger.error(f"Port {args.port} is already in use. Exiting.")
+        sys.exit(1)
     
     # Import and run app
     from backend.main import app, manager

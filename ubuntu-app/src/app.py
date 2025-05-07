@@ -15,6 +15,7 @@ import logging
 import threading
 import subprocess
 import websocket
+import time
 from pathlib import Path
 import gi
 
@@ -53,6 +54,10 @@ class SICApplication(Gtk.Application):
             "notification_mirroring": True,
             "auto_reconnect": True
         }
+        self.reconnect_attempts = 0
+        self.max_reconnect_attempts = 10
+        self.heartbeat_timer = None
+        self.current_pairing_code = None  # Store current pairing code to prevent changes
         
         # Initialize notification system
         Notify.init("SIC Ubuntu")
@@ -101,13 +106,20 @@ class SICApplication(Gtk.Application):
             
         try:
             logger.info("Starting server...")
-            cmd = [sys.executable, str(SERVER_DIR / "serve.py"), 
-                   "--host", "127.0.0.1",  # Only listen on localhost for security
-                   "--port", "8000"]
+            # Use the Python interpreter from the virtual environment
+            python_executable = str(PROJECT_ROOT / "venv_with_system_site" / "bin" / "python")
+            
+            cmd = [python_executable, str(SERVER_DIR / "serve.py"), 
+                   "--host", "0.0.0.0",  # Listen on all interfaces so it's accessible over the network
+                   "--port", "8000",
+                   "--generate-qr"]  # Add the flag to generate QR code and output pairing code
             
             # Start server without opening a browser window
             env = os.environ.copy()
             env["SIC_HEADLESS"] = "1"  # Custom env var to indicate headless mode
+            
+            # Log the command being executed for debugging
+            logger.info(f"Executing: {' '.join(cmd)}")
             
             self.server_process = subprocess.Popen(
                 cmd, 
@@ -140,14 +152,26 @@ class SICApplication(Gtk.Application):
                 else:
                     logger.info(f"Server: {line}")
                     
-                # Look for the pairing code in the output
-                if "pairing code:" in line.lower():
+                # Look for the pairing code in the output - make pattern more flexible
+                if "pairing code" in line.lower() or "pairingcode" in line.lower():
                     try:
-                        # Extract pairing code and device ID
-                        pairing_code = line.split("pairing code:")[-1].strip()
+                        # Extract pairing code (handle different formats)
+                        if ":" in line:
+                            pairing_code = line.split(":")[-1].strip()
+                        else:
+                            # Try to find the code as a 6-character alphanumeric string
+                            import re
+                            match = re.search(r"[A-Z0-9]{6}", line)
+                            if match:
+                                pairing_code = match.group(0)
+                            else:
+                                continue  # No valid code found in this line
+                                
+                        logger.info(f"Found pairing code: {pairing_code}")
+                        self.current_pairing_code = pairing_code  # Store pairing code
                         GLib.idle_add(self.window.update_pairing_code, pairing_code)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.error(f"Error extracting pairing code: {e}")
         
         # Process has ended
         logger.warning("Server process has terminated")
@@ -169,28 +193,67 @@ class SICApplication(Gtk.Application):
             if self.ws_client:
                 self.ws_client.close()
             
+            # Add a small delay to ensure server is ready
+            time.sleep(2)
+            
+            # Use local IP address for better connectivity
+            host = "localhost"
+            port = 8000
+            
+            # Try to get local IP address for better connectivity
+            try:
+                # Get local IP by creating a temporary socket
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                # Connect to any external IP to determine which interface to use
+                s.connect(("8.8.8.8", 80))
+                host = s.getsockname()[0]
+                s.close()
+                logger.info(f"Using local IP: {host}")
+            except Exception as e:
+                logger.warning(f"Could not determine local IP, using localhost: {e}")
+            
             # Connect to WebSocket server
+            ws_url = f"ws://{host}:{port}/ws"
+            logger.info(f"Connecting to WebSocket at: {ws_url}")
+            
+            # Create WebSocket with improved options
             self.ws_client = websocket.WebSocketApp(
-                "ws://localhost:8000/ws",
+                ws_url,
                 on_open=self.on_ws_open,
                 on_message=self.on_ws_message,
                 on_error=self.on_ws_error,
                 on_close=self.on_ws_close
             )
             
-            logger.info("Connecting to WebSocket server...")
-            GLib.idle_add(self.window.update_status, "Connecting...", "info")
+            # Configure WebSocket connection with improved settings
+            self.ws_client.run_forever(
+                ping_interval=15,       # Reduced from 30 seconds for more responsive detection
+                ping_timeout=5,         # Reduced from 10 seconds
+                reconnect=self.settings["auto_reconnect"],
+                skip_utf8_validation=True  # For better performance
+            )
             
-            # Run WebSocket connection loop
-            self.ws_client.run_forever()
+            logger.info("WebSocket connection thread started")
+            GLib.idle_add(self.window.update_status, "Connecting...", "info")
         except Exception as e:
             logger.error(f"WebSocket connection error: {e}")
             GLib.idle_add(self.window.update_status, f"Connection error: {e}", "error")
+            
+            # Attempt to reconnect with exponential backoff
+            if self.settings["auto_reconnect"] and self.reconnect_attempts < self.max_reconnect_attempts:
+                delay = min(30, 2 ** self.reconnect_attempts)  # Exponential backoff with 30s max
+                logger.info(f"Reconnecting in {delay}s (attempt {self.reconnect_attempts + 1}/{self.max_reconnect_attempts})")
+                self.reconnect_attempts += 1
+                threading.Timer(delay, self.connect_to_server).start()
     
     def on_ws_open(self, ws):
         """WebSocket connection opened"""
         logger.info("WebSocket connected")
         self.connected = True
+        self.reconnect_attempts = 0
+        
+        # Start heartbeat timer
+        self.start_heartbeat(ws)
         
         # Update UI in the main thread
         GLib.idle_add(self.window.update_status, "Connected", "success")
@@ -200,6 +263,33 @@ class SICApplication(Gtk.Application):
             "type": "admin_request",
             "action": "get_status"
         }))
+    
+    def start_heartbeat(self, ws):
+        """Start WebSocket heartbeat"""
+        def send_ping():
+            if self.connected and self.ws_client:
+                try:
+                    ws.send(json.dumps({"type": "ping"}))
+                    logger.debug("Sent heartbeat ping")
+                    # Schedule next heartbeat
+                    self.heartbeat_timer = threading.Timer(30.0, send_ping)
+                    self.heartbeat_timer.daemon = True
+                    self.heartbeat_timer.start()
+                except Exception as e:
+                    logger.error(f"Error sending heartbeat ping: {e}")
+                    self.stop_heartbeat()
+        
+        # Start initial heartbeat
+        self.heartbeat_timer = threading.Timer(30.0, send_ping)
+        self.heartbeat_timer.daemon = True
+        self.heartbeat_timer.start()
+    
+    def stop_heartbeat(self):
+        """Stop WebSocket heartbeat"""
+        if self.heartbeat_timer:
+            self.heartbeat_timer.cancel()
+            self.heartbeat_timer = None
+            logger.debug("Stopped heartbeat timer")
     
     def on_ws_message(self, ws, message):
         """WebSocket message received"""
@@ -245,6 +335,9 @@ class SICApplication(Gtk.Application):
                     summary = data.get("summary", "Notification")
                     body = data.get("body", "")
                     GLib.idle_add(self.show_notification, app_name, summary, body)
+            
+            elif data.get("type") == "pong":
+                logger.debug("Received heartbeat pong")
         
         except Exception as e:
             logger.error(f"Error processing message: {e}")
@@ -253,17 +346,25 @@ class SICApplication(Gtk.Application):
         """WebSocket error handler"""
         logger.error(f"WebSocket error: {error}")
         self.connected = False
+        self.stop_heartbeat()
         GLib.idle_add(self.window.update_status, f"Connection error: {error}", "error")
     
     def on_ws_close(self, ws, close_status_code, close_msg):
         """WebSocket connection closed"""
         logger.warning(f"WebSocket connection closed: {close_status_code} {close_msg}")
         self.connected = False
+        self.stop_heartbeat()
         GLib.idle_add(self.window.update_status, "Disconnected", "warning")
         
         # Attempt to reconnect if auto-reconnect is enabled
-        if self.settings["auto_reconnect"]:
-            threading.Timer(3.0, self.connect_to_server).start()
+        if self.settings["auto_reconnect"] and self.reconnect_attempts < self.max_reconnect_attempts:
+            delay = min(30, 2 ** self.reconnect_attempts)  # Exponential backoff with 30s max
+            logger.info(f"Reconnecting in {delay}s (attempt {self.reconnect_attempts + 1}/{self.max_reconnect_attempts})")
+            self.reconnect_attempts += 1
+            threading.Timer(delay, self.connect_to_server).start()
+        elif self.reconnect_attempts >= self.max_reconnect_attempts:
+            logger.error(f"Max reconnection attempts ({self.max_reconnect_attempts}) reached")
+            GLib.idle_add(self.window.update_status, "Connection failed - restart app", "error")
     
     def send_message(self, message):
         """Send a message to the WebSocket server"""
@@ -323,6 +424,9 @@ class SICApplication(Gtk.Application):
             except subprocess.TimeoutExpired:
                 logger.warning("Server did not terminate gracefully, killing")
                 self.server_process.kill()
+        
+        # Stop heartbeat timer
+        self.stop_heartbeat()
         
         # Clean up notifications
         Notify.uninit()
@@ -615,21 +719,21 @@ class SICMainWindow(Gtk.ApplicationWindow):
         css_provider = Gtk.CssProvider()
         css = """
             .card {
-                border: 1px solid #ddd;
+                border: 1px solid alpha(currentColor, 0.2);
                 border-radius: 6px;
                 padding: 15px;
-                background-color: #fff;
+                background-color: alpha(currentColor, 0.05);
             }
             .card-header {
                 font-weight: bold;
                 font-size: 18px;
-                border-bottom: 1px solid #eee;
+                border-bottom: 1px solid alpha(currentColor, 0.1);
                 padding-bottom: 10px;
                 margin-bottom: 10px;
             }
             .code {
                 font-family: monospace;
-                background-color: #f7f7f7;
+                background-color: alpha(currentColor, 0.07);
                 padding: 6px;
                 border-radius: 4px;
             }
@@ -650,10 +754,10 @@ class SICMainWindow(Gtk.ApplicationWindow):
             }
             .device-row {
                 padding: 8px;
-                border-bottom: 1px solid #eee;
+                border-bottom: 1px solid alpha(currentColor, 0.1);
             }
             .transfer-card {
-                border: 1px solid #eee;
+                border: 1px solid alpha(currentColor, 0.1);
                 border-radius: 4px;
                 padding: 10px;
                 margin-bottom: 8px;

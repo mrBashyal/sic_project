@@ -40,16 +40,15 @@ def register_notification_callback(callback: Callable[[Dict[str, Any]], None]) -
 def _on_notification_received(*args, **kwargs) -> None:
     """
     Handle incoming notification from dbus.
-    
     Formats notification data and calls all registered callbacks.
     """
     try:
         app_name = str(args[0]) if args and len(args) > 0 else "Unknown"
-        replaces_id = int(args[1]) if args and len(args) > 1 else 0
+        replaces_id = int(args[1]) if args and len(args) > 1 and isinstance(args[1], (str, int)) else 0
         app_icon = str(args[2]) if args and len(args) > 2 else ""
         summary = str(args[3]) if args and len(args) > 3 else ""
         body = str(args[4]) if args and len(args) > 4 else ""
-        
+
         # Construct notification object
         notification = {
             "type": "notification",
@@ -60,16 +59,16 @@ def _on_notification_received(*args, **kwargs) -> None:
             "body": body,
             "timestamp": time.time()
         }
-        
+
         logger.info(f"Notification captured: {app_name} - {summary}")
-        
+
         # Call all registered callbacks
         for callback in _notification_callbacks:
             try:
                 callback(notification)
             except Exception as e:
                 logger.error(f"Error in notification callback: {e}")
-                
+
     except Exception as e:
         logger.error(f"Error processing notification: {e}")
 
