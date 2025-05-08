@@ -66,6 +66,12 @@ dependencies {
     // implementation 'com.squareup.retrofit2:retrofit:2.9.0'
     // implementation 'com.squareup.retrofit2:converter-gson:2.9.0' // For Gson with Retrofit.
 
+    // WebSocket client
+    implementation 'org.java-websocket:Java-WebSocket:1.5.6' // Updated to a recent version
+
+    // mDNS (JmDNS) for network service discovery
+    implementation 'javax.jmdns:jmdns:3.5.8' // Updated to a recent version
+
     // JSON parsing - Uncomment if needed (e.g., Gson).
     // implementation 'com.google.code.gson:gson:2.10.1'
 
