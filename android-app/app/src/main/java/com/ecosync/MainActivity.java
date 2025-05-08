@@ -13,6 +13,8 @@ import android.widget.EditText;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.appcompat.app.AppCompatActivity;
+
 import org.java_websocket.client.WebSocketClient;
 import org.java_websocket.handshake.ServerHandshake;
 import org.json.JSONException;
@@ -35,7 +37,7 @@ import javax.jmdns.ServiceListener;
  * It will be responsible for displaying the main UI, allowing users to manage services,
  * initiate actions like file transfers, and navigate to settings or permission requests.
  */
-public class MainActivity extends Activity {
+public class MainActivity extends AppCompatActivity {
 
     private static final String TAG = "EcoSyncMainActivity";
     private static final String JMDNS_SERVICE_TYPE = "_sic-sync._tcp.local.";

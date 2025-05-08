@@ -1,7 +1,7 @@
-<!-- Main configuration file for the Android app, defining components, permissions, and other metadata. -->
+<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
-    package="com.ecosync"> <!-- Unique package name for the app. -->
+    package="com.ecosync">
 
     <!-- Permissions required by the app -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -22,7 +22,7 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/AppTheme"
-        android:usesCleartextTraffic="true" <!-- Allows HTTP traffic; consider HTTPS for sensitive data. -->
+        android:usesCleartextTraffic="true"
         tools:targetApi="31">
 
         <!-- Main application Activity (entry point). -->

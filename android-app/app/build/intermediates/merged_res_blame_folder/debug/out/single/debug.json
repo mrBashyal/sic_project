@@ -1,0 +1,22 @@
+[
+    {
+        "merged": "/home/bashyal/.gradle/daemon/7.6/com.ecosync.app-merged_res-32:/mipmap-anydpi-v26_ic_launcher_round.xml.flat",
+        "source": "/home/bashyal/.gradle/daemon/7.6/com.ecosync.app-main-34:/mipmap-anydpi-v26/ic_launcher_round.xml"
+    },
+    {
+        "merged": "/home/bashyal/.gradle/daemon/7.6/com.ecosync.app-merged_res-32:/xml_accessibility_service_config.xml.flat",
+        "source": "/home/bashyal/.gradle/daemon/7.6/com.ecosync.app-main-34:/xml/accessibility_service_config.xml"
+    },
+    {
+        "merged": "com.ecosync.app-merged_res-32:/layout_activity_main.xml.flat",
+        "source": "com.ecosync.app-main-34:/layout/activity_main.xml"
+    },
+    {
+        "merged": "/home/bashyal/.gradle/daemon/7.6/com.ecosync.app-merged_res-32:/mipmap-anydpi-v26_ic_launcher.xml.flat",
+        "source": "/home/bashyal/.gradle/daemon/7.6/com.ecosync.app-main-34:/mipmap-anydpi-v26/ic_launcher.xml"
+    },
+    {
+        "merged": "/home/bashyal/.gradle/daemon/7.6/com.ecosync.app-merged_res-32:/layout_activity_main.xml.flat",
+        "source": "/home/bashyal/.gradle/daemon/7.6/com.ecosync.app-main-34:/layout/activity_main.xml"
+    }
+]

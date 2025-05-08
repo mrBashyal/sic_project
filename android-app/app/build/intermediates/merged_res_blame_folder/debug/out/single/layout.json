@@ -1,0 +1,10 @@
+[
+    {
+        "merged": "com.ecosync.app-mergeDebugResources-31:/layout/activity_main.xml",
+        "source": "com.ecosync.app-main-34:/layout/activity_main.xml"
+    },
+    {
+        "merged": "/home/bashyal/.gradle/daemon/7.6/com.ecosync.app-mergeDebugResources-31:/layout/activity_main.xml",
+        "source": "/home/bashyal/.gradle/daemon/7.6/com.ecosync.app-main-34:/layout/activity_main.xml"
+    }
+]
